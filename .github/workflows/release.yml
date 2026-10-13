@@ -1,12 +1,17 @@
 name: Release
 
 # macOS (universal .dmg) and Windows (x64 portable .zip) builds for the ArtCraft launcher.
-# Run it from the Actions tab, or push a tag such as v1.0.0 to also publish a GitHub release
-# with the files and a SHA256SUMS.txt. Builds are unsigned: no Apple or Windows certificates.
+# Run it from the Actions tab (fill in "release tag" to publish a GitHub release), or push a tag
+# such as v1.0.0; a release carries the files and a SHA256SUMS.txt. Builds are unsigned: no Apple or Windows certificates.
 # The license key is not built in: the app fetches it from the license panel at run time.
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish, e.g. v1.0.0 (empty: build only)"
+        type: string
+        default: ""
   push:
     tags: ["v*"]
 
@@ -77,7 +82,7 @@ jobs:
   release:
     name: Publish release
     needs: [macos, windows]
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || inputs.tag != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -87,7 +92,8 @@ jobs:
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           cd out
           sha256sum * > SHA256SUMS.txt
-          gh release create "$GITHUB_REF_NAME" * --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes "macOS and Windows builds with the ArtCraft license check."
+          gh release create "$TAG" * --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TAG" --notes "macOS and Windows builds with the ArtCraft license check."
