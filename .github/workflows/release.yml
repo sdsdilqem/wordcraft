@@ -3,6 +3,7 @@ name: Release
 # macOS (universal .dmg) and Windows (x64 portable .zip) builds for the ArtCraft launcher.
 # Run it from the Actions tab, or push a tag such as v1.0.0 to also publish a GitHub release
 # with the files and a SHA256SUMS.txt. Builds are unsigned: no Apple or Windows certificates.
+# The license key is not built in: the app fetches it from the license panel at run time.
 
 on:
   workflow_dispatch:
@@ -17,21 +18,8 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  key:
-    name: License key present
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Refuse to build without the license panel's public key
-        run: |
-          if [ -z "$(tr -d '[:space:]' < crates/craft-license/pubkey.txt)" ]; then
-            echo "::error::crates/craft-license/pubkey.txt is empty. Copy the key from Panel -> Proqramlar -> Lisenziya acari; without it the app rejects every license."
-            exit 1
-          fi
-
   macos:
     name: macOS universal
-    needs: key
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -57,7 +45,6 @@ jobs:
 
   windows:
     name: Windows x64
-    needs: key
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

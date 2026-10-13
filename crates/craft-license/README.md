@@ -14,10 +14,10 @@ License check shared by the Craft apps and the Creative Cloud launcher.
   If the license expires while the app is open, the user is told to save their work and the app closes
   10 minutes later.
 
-Build the apps with the panel's public key (Panel → Proqramlar → Lisenziya açarı):
+No key is built into the apps. They fetch the panel's public key from `https://lisenziyam.az/adobe/api/key.php`
+on every check and keep the last one (tied to this computer) for offline use. When the key is replaced in
+Panel → Proqramlar, each app picks up the new key and a newly signed license on its next check.
+`CRAFT_LICENSE_API=<url> cargo build` points a build at another server (for testing).
 
-```
-CRAFT_LICENSE_PUBKEY=<base64 key> cargo build --release
-```
-
-This is basic protection: a patched binary can skip the check.
+This is basic protection: a patched binary, or someone who blocks the server and forges the cached key,
+can get past the check.

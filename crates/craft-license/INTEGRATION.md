@@ -16,8 +16,7 @@ Every `storytold/*` app is a Rust workspace with the same layout, so the change 
    ```rust
    craft_license::enforce("PhotoCraft");
    ```
-5. Build with the panel's public key: set the repository variable `CRAFT_LICENSE_PUBKEY`
-   (Settings → Secrets and variables → Actions → Variables) and pass it to the release build's environment.
+5. Nothing else: the app fetches the signing key from the panel (`api/key.php`) by itself.
 
 Keep the app's `LICENSE-MIT`, `LICENSE-APACHE` and `NOTICE` files, and note the change in `NOTICE`
 ("Modified to add a license check"), as the Apache-2.0 license requires for changed files.

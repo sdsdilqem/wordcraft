@@ -8,12 +8,12 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{fs, thread};
 
-/// The license panel's public key (base64): the `CRAFT_LICENSE_PUBKEY` build variable, else the
-/// `pubkey.txt` next to this crate's Cargo.toml (copied from Panel → Proqramlar). An app built
-/// with neither rejects every license (fails closed).
-const PUBKEY: Option<&str> = match option_env!("CRAFT_LICENSE_PUBKEY") {
-    Some(k) => Some(k),
-    None => Some(include_str!("../pubkey.txt")),
+/// The license panel's API. The signing key is fetched from here, so a key changed in the panel
+/// reaches every app on its next check; nothing key-related is built into the apps.
+/// `CRAFT_LICENSE_API` at build time overrides it (for a test server).
+const API: &str = match option_env!("CRAFT_LICENSE_API") {
+    Some(a) => a,
+    None => "https://lisenziyam.az/adobe/api",
 };
 /// How often a running app asks the server for a fresh license.
 const REFRESH_EVERY: u64 = 6 * 3600;
@@ -38,7 +38,6 @@ pub struct Payload {
     pub iat: u64,
     pub exp: Option<u64>,
     pub refresh_by: u64,
-    pub api: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -92,6 +91,10 @@ fn data_dir() -> Option<PathBuf> {
 
 pub fn license_path() -> Option<PathBuf> {
     data_dir().map(|d| d.join("license.json"))
+}
+
+fn key_path() -> Option<PathBuf> {
+    data_dir().map(|d| d.join("license-key"))
 }
 
 fn clock_path() -> Option<PathBuf> {
@@ -155,9 +158,9 @@ pub fn delete_file() {
     }
 }
 
-/// Check the signature and that the license was issued for this computer.
-pub fn verify(f: &LicenseFile) -> Result<Payload, Problem> {
-    verify_with(f, PUBKEY.filter(|k| !k.trim().is_empty()).ok_or(Problem::Invalid)?, &machine_id())
+/// Check the signature against `key` and that the license was issued for this computer.
+pub fn verify(f: &LicenseFile, key: &str) -> Result<Payload, Problem> {
+    verify_with(f, key, &machine_id())
 }
 
 fn verify_with(f: &LicenseFile, pubkey_b64: &str, device: &str) -> Result<Payload, Problem> {
@@ -200,6 +203,59 @@ fn note_clock(t: u64) -> u64 {
 
 // ---------- server ----------
 
+fn agent() -> ureq::Agent {
+    ureq::AgentBuilder::new().timeout(Duration::from_secs(5)).build()
+}
+
+fn api_allowed(api: &str) -> bool {
+    api.starts_with("https://") || api.starts_with("http://127.0.0.1")
+}
+
+#[derive(Deserialize)]
+struct KeyAnswer {
+    ok: bool,
+    #[serde(default)]
+    public_key: String,
+}
+
+/// Tag binding a cached key to this computer, so the cache can't simply be swapped for a key
+/// from somewhere else (basic protection; see README).
+fn key_tag(key: &str, device: &str) -> String {
+    let d = Sha256::digest(format!("artcraft-key:{device}:{}", key.trim()).as_bytes());
+    d.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn read_cached_key() -> Option<String> {
+    let text = fs::read_to_string(key_path()?).ok()?;
+    let (key, tag) = text.trim().split_once(' ')?;
+    (key_tag(key, &machine_id()) == tag).then(|| key.to_owned())
+}
+
+fn cache_key(key: &str) {
+    if let Some(path) = key_path() {
+        let _ = fs::create_dir_all(path.parent().unwrap());
+        let _ = fs::write(&path, format!("{} {}", key.trim(), key_tag(key, &machine_id())));
+    }
+}
+
+/// The panel's current public key, fetched over HTTPS (and cached for offline use).
+fn fetch_key() -> Option<String> {
+    if !api_allowed(API) {
+        return None;
+    }
+    let a: KeyAnswer = agent().get(&format!("{}/key.php", API.trim_end_matches('/'))).call().ok()?.into_json().ok()?;
+    let valid = B64.decode(a.public_key.trim()).is_ok_and(|k| k.len() == 32);
+    (a.ok && valid).then(|| {
+        cache_key(&a.public_key);
+        a.public_key.trim().to_owned()
+    })
+}
+
+/// The key to check against: the server's when reachable, else the last one it gave.
+fn current_key() -> Option<String> {
+    fetch_key().or_else(read_cached_key)
+}
+
 #[derive(Deserialize)]
 struct Answer {
     ok: bool,
@@ -215,12 +271,11 @@ enum Refresh {
 }
 
 /// Ask the server for a fresh license with the saved token.
-fn refresh(f: &LicenseFile, api: &str) -> Refresh {
-    if f.token.is_empty() || !api.starts_with("https://") && !api.starts_with("http://127.0.0.1") {
+fn refresh(f: &LicenseFile) -> Refresh {
+    if f.token.is_empty() || !api_allowed(API) {
         return Refresh::Unreachable;
     }
-    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(5)).build();
-    let res = agent.get(&format!("{}/license.php", api.trim_end_matches('/'))).set("Authorization", &format!("Bearer {}", f.token)).call();
+    let res = agent().get(&format!("{}/license.php", API.trim_end_matches('/'))).set("Authorization", &format!("Bearer {}", f.token)).call();
     let resp = match res {
         Ok(r) => r,
         Err(ureq::Error::Status(_, r)) => r,
@@ -239,28 +294,35 @@ fn refresh(f: &LicenseFile, api: &str) -> Refresh {
     }
 }
 
-/// Full check: read, verify, refresh when due (or forced), and judge the dates.
+/// Full check: fetch the key, read and verify the license, refresh it when due (or forced, or
+/// when it was signed by a key the panel has since replaced), and judge the dates.
 pub fn check(force_refresh: bool) -> Result<Payload, Problem> {
     let t = now();
     let last_seen = note_clock(t);
     let file = read_file().ok_or(Problem::Missing)?;
-    let mut p = verify(&file)?;
-    if force_refresh || t >= p.iat + REFRESH_EVERY {
-        match refresh(&file, &p.api) {
-            Refresh::Updated(new) => {
-                if let Ok(np) = verify(&new) {
+    // Never reached the server and no key from before: nothing to check against yet.
+    let key = current_key().ok_or(Problem::Offline)?;
+    let verified = verify(&file, &key);
+    let due = verified.as_ref().map_or(true, |p| force_refresh || t >= p.iat + REFRESH_EVERY);
+    let p = if due {
+        match refresh(&file) {
+            Refresh::Updated(new) => match verify(&new, &key) {
+                Ok(np) => {
                     let _ = write_file(&new);
-                    p = np;
+                    np
                 }
-            }
+                Err(_) => verified?,
+            },
             Refresh::Refused(problem) => {
                 // Keep the token out of the way so a stale file can't be reused offline.
                 delete_file();
                 return Err(problem);
             }
-            Refresh::Unreachable => {}
+            Refresh::Unreachable => verified?,
         }
-    }
+    } else {
+        verified?
+    };
     judge(&p, t, last_seen)?;
     Ok(p)
 }
@@ -316,7 +378,7 @@ mod tests {
         (sk, pk)
     }
 
-    const P: &str = r#"{"v":1,"sub":"u","dev":"d1","iat":1000,"exp":5000,"refresh_by":3000,"api":"https://x/api"}"#;
+    const P: &str = r#"{"v":1,"sub":"u","dev":"d1","iat":1000,"exp":5000,"refresh_by":3000}"#;
 
     #[test]
     fn accepts_good_license() {
@@ -334,6 +396,14 @@ mod tests {
         assert_eq!(verify_with(&f, &pk, "d1").unwrap_err(), Problem::Invalid);
         let other = SigningKey::from_bytes(&[9u8; 32]);
         assert_eq!(verify_with(&signed(&other, P), &pk, "d1").unwrap_err(), Problem::Invalid);
+    }
+
+    #[test]
+    fn cached_key_is_bound_to_the_device() {
+        let (_, pk) = key();
+        assert_eq!(key_tag(&pk, "d1"), key_tag(&pk, "d1"));
+        assert_ne!(key_tag(&pk, "d1"), key_tag(&pk, "d2"));
+        assert_ne!(key_tag(&pk, "d1"), key_tag("AAAA", "d1"));
     }
 
     #[test]
