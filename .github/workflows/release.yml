@@ -1,6 +1,7 @@
 name: Release
 
-# macOS (universal .dmg) and Windows (x64 portable .zip) builds for the ArtCraft launcher.
+# Windows (x64 portable .zip) build for the ArtCraft launcher. The macOS .dmg is built on a Mac
+# and added to the same release (gh release upload), with its line appended to SHA256SUMS.txt.
 # Run it from the Actions tab (fill in "release tag" to publish a GitHub release), or push a tag
 # such as v1.0.0; a release carries the files and a SHA256SUMS.txt. Builds are unsigned: no Apple or Windows certificates.
 # The license key is not built in: the app fetches it from the license panel at run time.
@@ -23,31 +24,6 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  macos:
-    name: macOS universal
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Check out craft-fonts
-        uses: actions/checkout@v4
-        with:
-          repository: storytold/craft-fonts
-          ref: 8dcdacd5153e64560d109541a47d806f26f048c0
-          path: craft-fonts
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin, x86_64-apple-darwin
-      - uses: Swatinem/rust-cache@v2
-      - name: Build and package
-        env:
-          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
-        run: packaging/macos/package.sh --arch universal
-      - uses: actions/upload-artifact@v4
-        with:
-          name: release-macos
-          path: dist/release/wordcraft-*-macos-universal.dmg
-          if-no-files-found: error
-
   windows:
     name: Windows x64
     runs-on: windows-latest
@@ -81,7 +57,7 @@ jobs:
 
   release:
     name: Publish release
-    needs: [macos, windows]
+    needs: windows
     if: startsWith(github.ref, 'refs/tags/') || inputs.tag != ''
     runs-on: ubuntu-latest
     steps:
@@ -96,4 +72,4 @@ jobs:
         run: |
           cd out
           sha256sum * > SHA256SUMS.txt
-          gh release create "$TAG" * --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TAG" --notes "macOS and Windows builds with the ArtCraft license check."
+          gh release create "$TAG" * --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TAG" --notes "Builds with the ArtCraft license check. The macOS build is added separately."
