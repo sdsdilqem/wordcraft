@@ -11,6 +11,7 @@ description = "WordCraft desktop app"
 workspace = true
 
 [dependencies]
+craft-license = { workspace = true }
 wordcraft-doc = { workspace = true }
 wordcraft-engine = { workspace = true }
 wordcraft-proof = { workspace = true }

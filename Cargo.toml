@@ -11,6 +11,7 @@ rust-version = "1.90"
 repository = "https://github.com/storytold/wordcraft"
 
 [workspace.dependencies]
+craft-license = { path = "crates/craft-license" }
 # internal
 wordcraft-geom = { path = "crates/geom" }
 wordcraft-doc = { path = "crates/doc" }

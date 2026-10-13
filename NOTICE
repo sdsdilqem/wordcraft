@@ -58,3 +58,5 @@ Rust dependencies (egui, eframe, vello_cpu, skrifa, harfrust, krilla, quick-xml,
 are permissively licensed (MIT/Apache-2.0/BSD/ISC/Zlib) and fetched through crates.io.
 
 No Microsoft, Adobe, Avid or Autodesk icons, images, templates or artwork are included.
+
+Modified by sdsdilqem: added a license check (crates/craft-license) that WordCraft runs at start-up.
