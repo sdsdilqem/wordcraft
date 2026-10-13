@@ -52,6 +52,8 @@ pub enum Problem {
     Suspended,
     /// The app could not reach the server for longer than the offline allowance.
     Offline,
+    /// The app has never reached the license server on this computer, so it has no key yet.
+    NoServer,
     /// The computer's clock was set back.
     Clock,
 }
@@ -72,6 +74,10 @@ impl Problem {
             Problem::Expired => format!("Your license has expired, so {app} can no longer be used. Contact your seller to renew it."),
             Problem::Suspended => format!("Your license was suspended, so {app} can no longer be used. Contact your seller."),
             Problem::Offline => format!("{app} could not check your license for too long. Connect to the internet and open Creative Cloud."),
+            Problem::NoServer => format!(
+                "{app} could not reach the license server ({API}). Check the internet connection or firewall and try again.\n\nDetails are in {}.",
+                log_path().map(|p| p.display().to_string()).unwrap_or_default()
+            ),
             Problem::Clock => "Your computer's date and time look wrong. Correct them and try again.".into(),
         }
     }
@@ -95,6 +101,19 @@ pub fn license_path() -> Option<PathBuf> {
 
 fn key_path() -> Option<PathBuf> {
     data_dir().map(|d| d.join("license-key"))
+}
+
+fn log_path() -> Option<PathBuf> {
+    data_dir().map(|d| d.join("license.log"))
+}
+
+/// Keep the last few license-check errors on disk, so a failure can be diagnosed.
+fn log(msg: &str) {
+    let Some(path) = log_path() else { return };
+    let old = fs::read_to_string(&path).unwrap_or_default();
+    let keep: Vec<&str> = old.lines().rev().take(50).collect::<Vec<_>>().into_iter().rev().collect();
+    let _ = fs::create_dir_all(path.parent().unwrap());
+    let _ = fs::write(&path, format!("{}\n{} {msg}\n", keep.join("\n"), now()).trim_start());
 }
 
 fn clock_path() -> Option<PathBuf> {
@@ -204,7 +223,11 @@ fn note_clock(t: u64) -> u64 {
 // ---------- server ----------
 
 fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new().timeout(Duration::from_secs(5)).build()
+    // A browser-like user agent: some shared hosts' firewalls (ModSecurity) refuse library defaults.
+    ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(10))
+        .user_agent(concat!("Mozilla/5.0 (compatible; ArtCraft-License/", env!("CARGO_PKG_VERSION"), ")"))
+        .build()
 }
 
 fn api_allowed(api: &str) -> bool {
@@ -243,12 +266,31 @@ fn fetch_key() -> Option<String> {
     if !api_allowed(API) {
         return None;
     }
-    let a: KeyAnswer = agent().get(&format!("{}/key.php", API.trim_end_matches('/'))).call().ok()?.into_json().ok()?;
+    let url = format!("{}/key.php", API.trim_end_matches('/'));
+    let a: KeyAnswer = match agent().get(&url).call() {
+        Ok(r) => match r.into_json() {
+            Ok(a) => a,
+            Err(e) => {
+                log(&format!("{url}: answer is not the expected JSON ({e})"));
+                return None;
+            }
+        },
+        Err(ureq::Error::Status(code, _)) => {
+            log(&format!("{url}: HTTP {code}"));
+            return None;
+        }
+        Err(e) => {
+            log(&format!("{url}: {e}"));
+            return None;
+        }
+    };
     let valid = B64.decode(a.public_key.trim()).is_ok_and(|k| k.len() == 32);
-    (a.ok && valid).then(|| {
-        cache_key(&a.public_key);
-        a.public_key.trim().to_owned()
-    })
+    if !(a.ok && valid) {
+        log(&format!("{url}: no valid public_key in the answer"));
+        return None;
+    }
+    cache_key(&a.public_key);
+    Some(a.public_key.trim().to_owned())
 }
 
 /// The key to check against: the server's when reachable, else the last one it gave.
@@ -279,7 +321,10 @@ fn refresh(f: &LicenseFile) -> Refresh {
     let resp = match res {
         Ok(r) => r,
         Err(ureq::Error::Status(_, r)) => r,
-        Err(_) => return Refresh::Unreachable,
+        Err(e) => {
+            log(&format!("license.php: {e}"));
+            return Refresh::Unreachable;
+        }
     };
     let Ok(a) = resp.into_json::<Answer>() else { return Refresh::Unreachable };
     match (a.ok, a.license) {
@@ -301,7 +346,7 @@ pub fn check(force_refresh: bool) -> Result<Payload, Problem> {
     let last_seen = note_clock(t);
     let file = read_file().ok_or(Problem::Missing)?;
     // Never reached the server and no key from before: nothing to check against yet.
-    let key = current_key().ok_or(Problem::Offline)?;
+    let key = current_key().ok_or(Problem::NoServer)?;
     let verified = verify(&file, &key);
     let due = verified.as_ref().map_or(true, |p| force_refresh || t >= p.iat + REFRESH_EVERY);
     let p = if due {
@@ -347,6 +392,7 @@ fn show(title: &str, message: &str) {
 /// license is not valid, and keeps checking in the background while the app runs.
 pub fn enforce(app_name: &'static str) {
     if let Err(problem) = check(true) {
+        log(&format!("{app_name}: {problem:?}"));
         show(problem.title(), &problem.message(app_name));
         std::process::exit(2);
     }

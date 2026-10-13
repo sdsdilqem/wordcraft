@@ -71,5 +71,13 @@ jobs:
           TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           cd out
-          sha256sum * > SHA256SUMS.txt
-          gh release create "$TAG" * --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TAG" --notes "Builds with the ArtCraft license check. The macOS build is added separately."
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # Rebuild of an existing release: replace the Windows zip, keep the macOS line in SHA256SUMS.txt.
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -p SHA256SUMS.txt -D ../old || true
+            gh release upload "$TAG" *.zip --repo "$GITHUB_REPOSITORY" --clobber
+            { grep -v 'windows-x64-portable.zip' ../old/SHA256SUMS.txt 2>/dev/null || true; sha256sum *.zip; } > SHA256SUMS.txt
+            gh release upload "$TAG" SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            sha256sum * > SHA256SUMS.txt
+            gh release create "$TAG" * --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TAG" --notes "Builds with the ArtCraft license check. The macOS build is added separately."
+          fi
